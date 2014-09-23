@@ -3,10 +3,13 @@ package zabbix
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync/atomic"
 )
 
@@ -35,6 +38,12 @@ type Error struct {
 	Data    string `json:"data"`
 }
 
+type Version struct {
+	Major   int
+	Minor   int
+	Release int
+}
+
 func (e *Error) Error() string {
 	return fmt.Sprintf("%d (%s): %s", e.Code, e.Message, e.Data)
 }
@@ -55,11 +64,12 @@ func (e *ExpectedMore) Error() string {
 }
 
 type API struct {
-	Auth   string      // auth token, filled by Login()
-	Logger *log.Logger // request/response logger, nil by default
-	url    string
-	c      http.Client
-	id     int32
+	Auth        string      // auth token, filled by Login()
+	Logger      *log.Logger // request/response logger, nil by default
+	url         string
+	c           http.Client
+	id          int32
+	versioninfo Version
 }
 
 // Creates new API access object.
@@ -81,12 +91,30 @@ func (api *API) printf(format string, v ...interface{}) {
 	}
 }
 
+func (api *API) setVersion() (err error) {
+	strVersion, err := api.Version()
+	api.printf("strVersion: %s", strVersion)
+	var versioninfo []string
+	versioninfo = strings.Split(strVersion, ".")
+
+	if len(versioninfo) != 3 {
+		err = errors.New("Unable to determine version")
+		return
+	}
+
+	api.versioninfo.Major, err = strconv.Atoi(versioninfo[0])
+	api.versioninfo.Minor, err = strconv.Atoi(versioninfo[1])
+	api.versioninfo.Release, err = strconv.Atoi(versioninfo[2])
+
+	return
+}
+
 func (api *API) callBytes(method string, params interface{}) (b []byte, err error) {
 	id := atomic.AddInt32(&api.id, 1)
-  auth := api.Auth
-  if method == "APIInfo.version" {
-    auth = ""
-  }
+	auth := api.Auth
+	if method == "APIInfo.version" {
+		auth = ""
+	}
 
 	jsonobj := request{"2.0", method, params, auth, id}
 	b, err = json.Marshal(jsonobj)
@@ -136,8 +164,13 @@ func (api *API) CallWithError(method string, params interface{}) (response Respo
 
 // Calls "user.login" API method and fills api.Auth field.
 func (api *API) Login(user, password string) (auth string, err error) {
+	err = api.setVersion()
+	loginFunction := "user.authenticate"
+	if api.bVer(2, 4, 0) {
+		loginFunction = "user.login"
+	}
 	params := map[string]string{"user": user, "password": password}
-	response, err := api.CallWithError("user.login", params)
+	response, err := api.CallWithError(loginFunction, params)
 	if err != nil {
 		return
 	}
@@ -156,4 +189,16 @@ func (api *API) Version() (v string, err error) {
 
 	v = response.Result.(string)
 	return
+}
+
+func (api *API) bVer(major int, minor int, release int) bool {
+	if api.versioninfo.Major > major {
+		return true
+	} else if api.versioninfo.Major == major && api.versioninfo.Minor >= minor {
+		return true
+	} else if api.versioninfo.Major == major && api.versioninfo.Minor == minor && api.versioninfo.Release >= release {
+		return true
+	}
+
+	return false
 }
